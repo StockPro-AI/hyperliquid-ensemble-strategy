@@ -1,0 +1,131 @@
+//@version=5
+strategy("Hyperliquid 6-Signal Ensemble", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=100000, commission_type=strategy.commission.percent, commission_value=0.05)
+
+// ============================================================
+// INPUTS
+// ============================================================
+atr_mult      = input.float(5.5,  "ATR Trailing Stop Multiplier", minval=1.0, maxval=20.0)
+atr_len       = input.int(14,     "ATR Length")
+rsi_len       = input.int(8,      "RSI Length")
+rsi_ob        = input.int(75,     "RSI Overbought Exit")
+rsi_os        = input.int(25,     "RSI Oversold Exit")
+ema_fast      = input.int(9,      "EMA Fast")
+ema_slow      = input.int(21,     "EMA Slow")
+macd_fast     = input.int(12,     "MACD Fast")
+macd_slow     = input.int(26,     "MACD Slow")
+macd_signal   = input.int(9,      "MACD Signal")
+bb_len        = input.int(20,     "BB Length")
+bb_mult       = input.float(2.0,  "BB Multiplier")
+momentum_len  = input.int(20,     "Momentum Length")
+vs_mom_len    = input.int(5,      "Very-Short Momentum Length")
+cooldown_bars = input.int(3,      "Cooldown Bars after Exit")
+vote_thresh   = input.int(4,      "Min Votes to Enter (of 6)")
+
+// ============================================================
+// SIGNALS
+// ============================================================
+
+// 1) Momentum
+mom         = close - close[momentum_len]
+sig_mom     = mom > 0 ? 1 : mom < 0 ? -1 : 0
+
+// 2) Very-Short Momentum
+vs_mom      = close - close[vs_mom_len]
+sig_vsmom   = vs_mom > 0 ? 1 : vs_mom < 0 ? -1 : 0
+
+// 3) EMA Crossover
+ema_f       = ta.ema(close, ema_fast)
+ema_s       = ta.ema(close, ema_slow)
+sig_ema     = ema_f > ema_s ? 1 : ema_f < ema_s ? -1 : 0
+
+// 4) RSI(8)
+rsi_val     = ta.rsi(close, rsi_len)
+sig_rsi     = rsi_val > 50 ? 1 : rsi_val < 50 ? -1 : 0
+
+// 5) MACD
+[macd_line, signal_line, _] = ta.macd(close, macd_fast, macd_slow, macd_signal)
+sig_macd    = macd_line > signal_line ? 1 : macd_line < signal_line ? -1 : 0
+
+// 6) BB Compression (breakout direction)
+basis       = ta.sma(close, bb_len)
+dev         = bb_mult * ta.stdev(close, bb_len)
+upper_bb    = basis + dev
+lower_bb    = basis - dev
+bb_width    = (upper_bb - lower_bb) / basis
+bb_compress = bb_width < ta.sma(bb_width, 50)
+sig_bb      = bb_compress and close > basis ? 1 : bb_compress and close < basis ? -1 : 0
+
+// ============================================================
+// ENSEMBLE VOTE (4-of-6 majority)
+// ============================================================
+total_long  = (sig_mom == 1 ? 1 : 0) + (sig_vsmom == 1 ? 1 : 0) + (sig_ema == 1 ? 1 : 0) + (sig_rsi == 1 ? 1 : 0) + (sig_macd == 1 ? 1 : 0) + (sig_bb == 1 ? 1 : 0)
+total_short = (sig_mom ==-1 ? 1 : 0) + (sig_vsmom ==-1 ? 1 : 0) + (sig_ema ==-1 ? 1 : 0) + (sig_rsi ==-1 ? 1 : 0) + (sig_macd ==-1 ? 1 : 0) + (sig_bb ==-1 ? 1 : 0)
+
+enter_long  = total_long  >= vote_thresh
+enter_short = total_short >= vote_thresh
+
+// ============================================================
+// ATR TRAILING STOP
+// ============================================================
+atr_val     = ta.atr(atr_len)
+var float trail_stop = na
+
+if strategy.position_size > 0
+    trail_stop := math.max(nz(trail_stop, low), close - atr_mult * atr_val)
+else if strategy.position_size < 0
+    trail_stop := math.min(nz(trail_stop, high), close + atr_mult * atr_val)
+else
+    trail_stop := na
+
+// ============================================================
+// COOLDOWN COUNTER
+// ============================================================
+var int bars_since_exit = 0
+
+if strategy.position_size == 0
+    bars_since_exit += 1
+else
+    bars_since_exit := 0
+
+in_cooldown = bars_since_exit < cooldown_bars and bars_since_exit > 0
+
+// ============================================================
+// ENTRIES
+// ============================================================
+if enter_long and strategy.position_size <= 0 and not in_cooldown
+    strategy.entry("Long", strategy.long)
+    trail_stop := close - atr_mult * atr_val
+
+if enter_short and strategy.position_size >= 0 and not in_cooldown
+    strategy.entry("Short", strategy.short)
+    trail_stop := close + atr_mult * atr_val
+
+// ============================================================
+// EXITS: ATR Trailing Stop + RSI Extreme Exit
+// ============================================================
+if strategy.position_size > 0
+    if close < trail_stop
+        strategy.close("Long", comment="ATR Trail Stop")
+    if rsi_val > rsi_ob
+        strategy.close("Long", comment="RSI OB Exit")
+
+if strategy.position_size < 0
+    if close > trail_stop
+        strategy.close("Short", comment="ATR Trail Stop")
+    if rsi_val < rsi_os
+        strategy.close("Short", comment="RSI OS Exit")
+
+// ============================================================
+// PLOTS
+// ============================================================
+plot(ema_f, "EMA Fast", color=color.new(color.blue, 0),  linewidth=1)
+plot(ema_s, "EMA Slow", color=color.new(color.orange, 0), linewidth=1)
+plot(trail_stop, "ATR Trail Stop", color=color.new(color.red, 0), style=plot.style_cross, linewidth=1)
+hline(0, "Zero", color=color.gray)
+
+bgcol = strategy.position_size > 0 ? color.new(color.green, 90) : strategy.position_size < 0 ? color.new(color.red, 90) : na
+bgcolor(bgcol)
+
+// Vote strength label (optional debug)
+if barstate.islast
+    label.new(bar_index, high, "L:" + str.tostring(total_long) + " S:" + str.tostring(total_short), style=label.style_label_down, size=size.small)
