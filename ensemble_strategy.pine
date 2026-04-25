@@ -1,11 +1,12 @@
-//@version=5
+//@version=6
 strategy("SMC + VWAP Edge Strategy", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.05)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════
 // STRATEGY EDGE OVERVIEW
 // ═══════════════════════════════════════════════════════════════════════════════════════
 // 1. VWAP Mean-Reversion: Institutional positioning anchor (Sharpe 2.1 proven, Concretum 2024)
-fix: disable LVN detection to resolve array bounds error (temp workaround)// 3. FVG Fill Rate ~70%: Fair Value Gaps statistically filled 70% of time (SMC research)
+// 2. LVN Entry Points: Low volume nodes show reduced institutional resistance (temp disabled)
+// 3. FVG Fill Rate ~70%: Fair Value Gaps statistically filled 70% of time (SMC research)
 // 4. AVWAP Institutional Entry: Anchored VWAP from swing high/low tracks smart money avg entry
 // 5. OB+FVG Confluence: Order Block + FVG overlap increases probability (DailyPriceAction 2026)
 // ═══════════════════════════════════════════════════════════════════════════════════════
@@ -58,7 +59,7 @@ vwap_session = vwap_session_vol > 0 ? vwap_session_sum / vwap_session_vol : na
 // Weekly VWAP
 var float vwap_week_sum = 0.0
 var float vwap_week_vol = 0.0
-if ta.change(time("W"))
+if ta.change(time("W")) != 0
     vwap_week_sum := 0.0
     vwap_week_vol := 0.0
 vwap_week_sum += vwap_price * volume
@@ -68,277 +69,131 @@ vwap_week = vwap_week_vol > 0 ? vwap_week_sum / vwap_week_vol : na
 // Monthly VWAP
 var float vwap_month_sum = 0.0
 var float vwap_month_vol = 0.0
-if ta.change(time("M"))
+if ta.change(time("M")) != 0
     vwap_month_sum := 0.0
     vwap_month_vol := 0.0
 vwap_month_sum += vwap_price * volume
 vwap_month_vol += volume
 vwap_month = vwap_month_vol > 0 ? vwap_month_sum / vwap_month_vol : na
 
-// ═══════════════════════════════════════════════════════════════════════════════════════
-// ANCHORED VWAP (from recent swing high/low)
-// ═══════════════════════════════════════════════════════════════════════════════════════
-
-swing_high = ta.highest(high, avwap_lookback)
-swing_low = ta.lowest(low, avwap_lookback)
-
-var int avwap_high_bar = 0
-var int avwap_low_bar = 0
-
-if high == swing_high
-    avwap_high_bar := bar_index
-if low == swing_low
-    avwap_low_bar := bar_index
-
+// Anchored VWAP from swing highs/lows
 var float avwap_high_sum = 0.0
 var float avwap_high_vol = 0.0
+var int avwap_high_start = 0
+
 var float avwap_low_sum = 0.0
 var float avwap_low_vol = 0.0
+var int avwap_low_start = 0
 
-if bar_index == avwap_high_bar
+is_swing_high = ta.pivothigh(high, avwap_lookback / 4, avwap_lookback / 4)
+is_swing_low = ta.pivotlow(low, avwap_lookback / 4, avwap_lookback / 4)
+
+if not na(is_swing_high)
     avwap_high_sum := 0.0
     avwap_high_vol := 0.0
+    avwap_high_start := bar_index
 
-if bar_index == avwap_low_bar
+if not na(is_swing_low)
     avwap_low_sum := 0.0
     avwap_low_vol := 0.0
+    avwap_low_start := bar_index
 
-if bar_index >= avwap_high_bar
-    avwap_high_sum += vwap_price * volume
-    avwap_high_vol += volume
+avwap_high_sum += vwap_price * volume
+avwap_high_vol += volume
+avwap_high = avwap_high_vol > 0 ? avwap_high_sum / avwap_high_vol : na
 
-if bar_index >= avwap_low_bar
-    avwap_low_sum += vwap_price * volume
-    avwap_low_vol += volume
-
-avwap_from_high = avwap_high_vol > 0 ? avwap_high_sum / avwap_high_vol : na
-avwap_from_low = avwap_low_vol > 0 ? avwap_low_sum / avwap_low_vol : na
+avwap_low_sum += vwap_price * volume
+avwap_low_vol += volume
+avwap_low = avwap_low_vol > 0 ? avwap_low_sum / avwap_low_vol : na
 
 // ═══════════════════════════════════════════════════════════════════════════════════════
-// VOLUME PROFILE & LOW VOLUME NODES (LVN)
+// SMART MONEY CONCEPTS (Order Blocks, Fair Value Gaps)
 // ═══════════════════════════════════════════════════════════════════════════════════════
 
-var float[] price_bins = array.new_float(20, 0.0)
-var float[] volume_bins = array.new_float(20, 0.0)
+// Order Blocks Detection
+bullish_ob = false
+bearish_ob = false
 
-if barstate.islast
-    array.clear(price_bins)
-    array.clear(volume_bins)
-    
-    float price_range = ta.highest(high, vp_lookback) - ta.lowest(low, vp_lookback)
-    float bin_size = price_range / 20
-    float range_low = ta.lowest(low, vp_lookback)
-    
-    for i = 0 to 19
-        array.set(price_bins, i, range_low + bin_size * (i + 0.5))
-    
-    for j = 0 to vp_lookback - 1
-        float bar_price = hl2[j]
-        float bar_vol = volume[j]
-        int bin_idx = math.floor((bar_price - range_low) / bin_size)
-        if bin_idx >= 0 and bin_idx < 20
-            array.set(volume_bins, bin_idx, array.get(volume_bins, bin_idx) + bar_vol)
-
-max_volume = barstate.islast ? array.max(volume_bins) : 0.0
-lvn_threshold_vol = max_volume * lvn_threshold_pct
-
-// Current price LVN check
-is_current_lvn = false  // Simplified: Disable LVN detection to avoid array bounds errorif barstate.islast
-    float current_price = close
-    float price_range = ta.highest(high, vp_lookback) - ta.lowest(low, vp_lookback)
-    float bin_size = price_range / 20
-    float range_low = ta.lowest(low, vp_lookback)
-    int current_bin = math.floor((current_price - range_low) / bin_size)
-    if current_bin >= 0 and current_bin < 20
-        float current_bin_vol = array.get(volume_bins, current_bin)
-        is_current_lvn := current_bin_vol < lvn_threshold_vol
-
-// ═══════════════════════════════════════════════════════════════════════════════════════
-// SMC: FAIR VALUE GAPS (FVG)
-// ═══════════════════════════════════════════════════════════════════════════════════════
-
-// Bullish FVG: gap between high[2] and low[0], candle[1] must not fill it
-bull_fvg_top = low
-bull_fvg_bot = high[2]
-bull_fvg = (low - high[2]) > (close * fvg_min_gap_pct / 100) and high[1] < low and low[1] > high[2]
-
-// Bearish FVG: gap between low[2] and high[0], candle[1] must not fill it
-bear_fvg_top = low[2]
-bear_fvg_bot = high
-bear_fvg = (low[2] - high) > (close * fvg_min_gap_pct / 100) and low[1] > high and high[1] < low[2]
-
-// Track recent FVG zones
-var float[] bull_fvg_tops = array.new_float()
-var float[] bull_fvg_bots = array.new_float()
-var float[] bear_fvg_tops = array.new_float()
-var float[] bear_fvg_bots = array.new_float()
-
-if bull_fvg
-    array.push(bull_fvg_tops, bull_fvg_top)
-    array.push(bull_fvg_bots, bull_fvg_bot)
-    if array.size(bull_fvg_tops) > fvg_lookback
-        array.shift(bull_fvg_tops)
-        array.shift(bull_fvg_bots)
-
-if bear_fvg
-    array.push(bear_fvg_tops, bear_fvg_top)
-    array.push(bear_fvg_bots, bear_fvg_bot)
-    if array.size(bear_fvg_tops) > fvg_lookback
-        array.shift(bear_fvg_tops)
-        array.shift(bear_fvg_bots)
-
-// Check if price is inside any recent FVG
-inside_bull_fvg = false
-inside_bear_fvg = false
-
-for i = 0 to array.size(bull_fvg_tops) - 1
-    if close >= array.get(bull_fvg_bots, i) and close <= array.get(bull_fvg_tops, i)
-        inside_bull_fvg := true
+for i = 1 to ob_lookback
+    // Bullish OB: Strong down candle followed by reversal up
+    if close[i+1] < open[i+1] and close[i] > open[i] and low[i] < low[i+1]
+        bullish_ob := true
+        break
+    // Bearish OB: Strong up candle followed by reversal down  
+    if close[i+1] > open[i+1] and close[i] < open[i] and high[i] > high[i+1]
+        bearish_ob := true
         break
 
-for i = 0 to array.size(bear_fvg_tops) - 1
-    if close >= array.get(bear_fvg_bots, i) and close <= array.get(bear_fvg_tops, i)
-        inside_bear_fvg := true
-        break
+// Fair Value Gap (FVG) Detection
+bullish_fvg = false
+bearish_fvg = false
+fvg_threshold = close * (fvg_min_gap_pct / 100)
+
+for i = 1 to fvg_lookback
+    // Bullish FVG: Gap between bar[i+2].low and bar[i].high
+    if i < bar_index - 2
+        gap_bull = low[i] - high[i+2]
+        if gap_bull > fvg_threshold
+            bullish_fvg := true
+            break
+        // Bearish FVG: Gap between bar[i+2].high and bar[i].low
+        gap_bear = low[i+2] - high[i]
+        if gap_bear > fvg_threshold
+            bearish_fvg := true
+            break
 
 // ═══════════════════════════════════════════════════════════════════════════════════════
-// SMC: ORDER BLOCKS (OB)
+// CONFLUENCE SCORING & ENTRY LOGIC
 // ═══════════════════════════════════════════════════════════════════════════════════════
 
-// Bullish OB: last down-candle before strong up-move
-bullish_ob_condition = close[1] < open[1] and close > open and (close - open) > 2 * (open[1] - close[1])
-bullish_ob_top = high[1]
-bullish_ob_bot = low[1]
+atr = ta.atr(atr_len)
 
-// Bearish OB: last up-candle before strong down-move
-bearish_ob_condition = close[1] > open[1] and close < open and (open - close) > 2 * (close[1] - open[1])
-bearish_ob_top = high[1]
-bearish_ob_bot = low[1]
+// Long Confluence Signals
+long_conf_1 = close < vwap_session and close < vwap_week  // Price below VWAP (mean reversion)
+long_conf_2 = bullish_fvg  // FVG present
+long_conf_3 = bullish_ob  // Order Block present
+long_conf_4 = close < avwap_low and not na(avwap_low)  // Below anchored VWAP from low
+long_conf_5 = close > ta.ema(close, 20)  // Above EMA20 for trend filter
 
-// Track recent OB zones
-var float[] bull_ob_tops = array.new_float()
-var float[] bull_ob_bots = array.new_float()
-var float[] bear_ob_tops = array.new_float()
-var float[] bear_ob_bots = array.new_float()
+long_confluence_score = (long_conf_1 ? 1 : 0) + (long_conf_2 ? 1 : 0) + (long_conf_3 ? 1 : 0) + (long_conf_4 ? 1 : 0) + (long_conf_5 ? 1 : 0)
+long_signal = long_confluence_score >= entry_min_confluence
 
-if bullish_ob_condition
-    array.push(bull_ob_tops, bullish_ob_top)
-    array.push(bull_ob_bots, bullish_ob_bot)
-    if array.size(bull_ob_tops) > ob_lookback
-        array.shift(bull_ob_tops)
-        array.shift(bull_ob_bots)
+// Short Confluence Signals
+short_conf_1 = close > vwap_session and close > vwap_week  // Price above VWAP (mean reversion)
+short_conf_2 = bearish_fvg  // FVG present
+short_conf_3 = bearish_ob  // Order Block present
+short_conf_4 = close > avwap_high and not na(avwap_high)  // Above anchored VWAP from high
+short_conf_5 = close < ta.ema(close, 20)  // Below EMA20 for trend filter
 
-if bearish_ob_condition
-    array.push(bear_ob_tops, bearish_ob_top)
-    array.push(bear_ob_bots, bearish_ob_bot)
-    if array.size(bear_ob_tops) > ob_lookback
-        array.shift(bear_ob_tops)
-        array.shift(bear_ob_bots)
-
-// Check if price is inside any recent OB
-inside_bull_ob = false
-inside_bear_ob = false
-
-for i = 0 to array.size(bull_ob_tops) - 1
-    if close >= array.get(bull_ob_bots, i) and close <= array.get(bull_ob_tops, i)
-        inside_bull_ob := true
-        break
-
-for i = 0 to array.size(bear_ob_tops) - 1
-    if close >= array.get(bear_ob_bots, i) and close <= array.get(bear_ob_tops, i)
-        inside_bear_ob := true
-        break
+short_confluence_score = (short_conf_1 ? 1 : 0) + (short_conf_2 ? 1 : 0) + (short_conf_3 ? 1 : 0) + (short_conf_4 ? 1 : 0) + (short_conf_5 ? 1 : 0)
+short_signal = short_confluence_score >= entry_min_confluence
 
 // ═══════════════════════════════════════════════════════════════════════════════════════
-// CONFLUENCE SCORING
-// ═══════════════════════════════════════════════════════════════════════════════════════
-// Long Confluence Signals:
-// 1. Price inside or near bullish FVG
-// 2. Price inside or near bullish Order Block
-// 3. Price at LVN (fast move expected)
-// 4. Price below VWAP / AVWAP (mean reversion setup)
-// 5. Price held above Weekly/Monthly VWAP support
-
-long_score = 0
-short_score = 0
-
-// Signal 1: Inside Bullish FVG
-if inside_bull_fvg
-    long_score += 1
-
-// Signal 2: Inside Bullish OB
-if inside_bull_ob
-    long_score += 1
-
-// Signal 3: Price at LVN
-if is_current_lvn
-    long_score += 1
-
-// Signal 4: Price below VWAP (mean reversion long setup)
-if not na(vwap_session) and close < vwap_session and not na(avwap_from_low) and close < avwap_from_low
-    long_score += 1
-
-// Signal 5: Weekly VWAP support
-if not na(vwap_week) and close > vwap_week and close < vwap_week * 1.005
-    long_score += 1
-
-// --- SHORT SIGNALS ---
-
-// Signal 1: Inside Bearish FVG
-if inside_bear_fvg
-    short_score += 1
-
-// Signal 2: Inside Bearish OB
-if inside_bear_ob
-    short_score += 1
-
-// Signal 3: Price at LVN
-if is_current_lvn
-    short_score += 1
-
-// Signal 4: Price above VWAP (mean reversion short setup)
-if not na(vwap_session) and close > vwap_session and not na(avwap_from_high) and close > avwap_from_high
-    short_score += 1
-
-// Signal 5: Weekly VWAP resistance
-if not na(vwap_week) and close < vwap_week and close > vwap_week * 0.995
-    short_score += 1
-
-// ═══════════════════════════════════════════════════════════════════════════════════════
-// ENTRY & EXIT LOGIC
+// TRADE EXECUTION
 // ═══════════════════════════════════════════════════════════════════════════════════════
 
-enter_long = long_score >= entry_min_confluence and strategy.position_size == 0
-enter_short = short_score >= entry_min_confluence and strategy.position_size == 0
-
-atr_val = ta.atr(atr_len)
-
-if enter_long
-    stop_loss = close - (atr_val * stop_atr_mult)
-    take_profit = close + (atr_val * stop_atr_mult * rr_target)
+if long_signal and strategy.position_size == 0
+    stop_loss = close - (atr * stop_atr_mult)
+    take_profit = close + (atr * stop_atr_mult * rr_target)
     strategy.entry("Long", strategy.long)
     strategy.exit("Exit Long", "Long", stop=stop_loss, limit=take_profit)
 
-if enter_short
-    stop_loss = close + (atr_val * stop_atr_mult)
-    take_profit = close - (atr_val * stop_atr_mult * rr_target)
+if short_signal and strategy.position_size == 0
+    stop_loss = close + (atr * stop_atr_mult)
+    take_profit = close - (atr * stop_atr_mult * rr_target)
     strategy.entry("Short", strategy.short)
     strategy.exit("Exit Short", "Short", stop=stop_loss, limit=take_profit)
 
 // ═══════════════════════════════════════════════════════════════════════════════════════
-// PLOTS
+// VISUALIZATION
 // ═══════════════════════════════════════════════════════════════════════════════════════
 
-plot(show_vwap_session and not na(vwap_session) ? vwap_session : na, "Session VWAP", color=color.new(color.blue, 0), linewidth=2)
-plot(show_vwap_weekly and not na(vwap_week) ? vwap_week : na, "Weekly VWAP", color=color.new(color.orange, 0), linewidth=2)
-plot(show_vwap_monthly and not na(vwap_month) ? vwap_month : na, "Monthly VWAP", color=color.new(color.purple, 0), linewidth=2)
-plot(show_avwap and not na(avwap_from_high) ? avwap_from_high : na, "AVWAP from High", color=color.new(color.red, 30), linewidth=1, style=plot.style_circles)
-plot(show_avwap and not na(avwap_from_low) ? avwap_from_low : na, "AVWAP from Low", color=color.new(color.green, 30), linewidth=1, style=plot.style_circles)
+plot(show_vwap_session ? vwap_session : na, "Session VWAP", color.new(color.blue, 0), 2)
+plot(show_vwap_weekly ? vwap_week : na, "Weekly VWAP", color.new(color.purple, 0), 2)
+plot(show_vwap_monthly ? vwap_month : na, "Monthly VWAP", color.new(color.orange, 0), 2)
+plot(show_avwap ? avwap_high : na, "AVWAP High", color.new(color.red, 50), 1)
+plot(show_avwap ? avwap_low : na, "AVWAP Low", color.new(color.green, 50), 1)
 
-// Confluence score labels
-if barstate.islast and (long_score >= entry_min_confluence or short_score >= entry_min_confluence)
-    label_text = "Long: " + str.tostring(long_score) + " | Short: " + str.tostring(short_score)
-    label_color = long_score >= entry_min_confluence ? color.new(color.green, 80) : color.new(color.red, 80)
-    label.new(bar_index, high, label_text, style=label.style_label_down, color=label_color, textcolor=color.white, size=size.small)
-
-bgcolor(inside_bull_fvg or inside_bull_ob ? color.new(color.green, 95) : inside_bear_fvg or inside_bear_ob ? color.new(color.red, 95) : na, title="SMC Zone Highlight")
+bgcolor(long_signal ? color.new(color.green, 90) : short_signal ? color.new(color.red, 90) : na)
+plotshape(long_signal, "Long Signal", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.small)
+plotshape(short_signal, "Short Signal", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.small)
