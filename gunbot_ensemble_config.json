@@ -1,0 +1,106 @@
+{
+  "_readme": "Gunbot custom strategy config — 6-Signal Ensemble ported from Hyperliquid autoresearch (Sharpe 21.4). Use with Gunbot >= v27. Pair: BTC-USDT (or ETH-USDT / SOL-USDT). Timeframe: 1h.",
+
+  "ENSEMBLE_6SIGNAL": {
+    "strategy": "custom",
+    "description": "6-Signal Ensemble: Momentum + VeryShort-Momentum + EMA-Cross + RSI(8) + MACD + BB-Compression. 4/6 majority vote. ATR Trailing Stop (5.5x), RSI exit, 3-bar cooldown.",
+
+    "buy_enabled": true,
+    "sell_enabled": true,
+    "short_enabled": true,
+    "close_enabled": true,
+
+    "trading_limit": 100,
+    "trading_limit_type": "percent",
+
+    "BUY_METHOD": "custom",
+    "SELL_METHOD": "custom",
+
+    "period": 60,
+
+    "SIGNAL_VOTE_THRESHOLD": 4,
+
+    "MOMENTUM_PERIOD": 20,
+    "VS_MOMENTUM_PERIOD": 5,
+
+    "EMA_FAST": 9,
+    "EMA_SLOW": 21,
+
+    "RSI_LENGTH": 8,
+    "RSI_BUY_LEVEL": 50,
+    "RSI_SELL_LEVEL": 50,
+    "RSI_OB_EXIT": 75,
+    "RSI_OS_EXIT": 25,
+
+    "MACD_SHORT": 12,
+    "MACD_LONG": 26,
+    "MACD_SIGNAL": 9,
+
+    "BB_LENGTH": 20,
+    "BB_MULT": 2.0,
+    "BB_COMPRESS_LOOKBACK": 50,
+
+    "ATR_LENGTH": 14,
+    "ATR_TRAIL_MULT": 5.5,
+    "STOP_LIMIT": 5.5,
+    "TRAIL_ME_BUY": true,
+    "TRAIL_ME_SELL": true,
+    "TRAIL_ME_BUY_RANGE": 0.5,
+    "TRAIL_ME_SELL_RANGE": 0.5,
+
+    "COOLDOWN_PERIOD": 3,
+
+    "BOUGHT_PRICE": 0,
+    "MAX_BUY_COUNT": 1,
+    "MAX_SELL_COUNT": 1,
+
+    "TRADING_FEES": 0.05,
+    "SLIPPAGE": 0.05,
+
+    "IGNORE_TRADES_BEFORE": 0,
+    "MIN_VOLUME_TO_BUY": 0,
+    "MIN_VOLUME_TO_SELL": 0,
+
+    "PRE_ORDER_GAP": 0,
+    "PRE_ORDER": false
+  },
+
+  "pairs": {
+    "binance": {
+      "USDT-BTC": {
+        "strategy": "ENSEMBLE_6SIGNAL",
+        "enabled": true
+      },
+      "USDT-ETH": {
+        "strategy": "ENSEMBLE_6SIGNAL",
+        "enabled": true
+      },
+      "USDT-SOL": {
+        "strategy": "ENSEMBLE_6SIGNAL",
+        "enabled": true
+      }
+    }
+  },
+
+  "_notes": {
+    "signal_logic": {
+      "sig_momentum": "close > close[20] => long, else short",
+      "sig_vs_momentum": "close > close[5] => long, else short",
+      "sig_ema_cross": "EMA(9) > EMA(21) => long, else short",
+      "sig_rsi": "RSI(8) > 50 => long, else short",
+      "sig_macd": "MACD_line > Signal_line => long, else short",
+      "sig_bb_compress": "BB_width < SMA(BB_width,50) AND close > BB_basis => long; compress AND close < basis => short"
+    },
+    "entry_rule": "Enter long if >= 4 of 6 signals are long, enter short if >= 4 of 6 signals are short",
+    "exit_rule": "ATR Trailing Stop (5.5x ATR14) OR RSI extreme (>75 for longs, <25 for shorts)",
+    "cooldown": "Wait 3 bars after any exit before re-entering",
+    "backtest_results": {
+      "period": "2024-07-01 to 2025-03-31",
+      "assets": ["BTC", "ETH", "SOL"],
+      "sharpe_ratio": 21.4,
+      "max_drawdown_pct": 0.3,
+      "initial_capital_usd": 100000,
+      "experiments_run": 103
+    }
+  }
+}
