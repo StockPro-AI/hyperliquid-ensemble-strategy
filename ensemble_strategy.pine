@@ -5,8 +5,7 @@ strategy("SMC + VWAP Edge Strategy", overlay=true, initial_capital=10000, defaul
 // STRATEGY EDGE OVERVIEW
 // ═══════════════════════════════════════════════════════════════════════════════════════
 // 1. VWAP Mean-Reversion: Institutional positioning anchor (Sharpe 2.1 proven, Concretum 2024)
-// 2. LVN Acceleration: Price moves fast through low-volume zones (no resistance)
-// 3. FVG Fill Rate ~70%: Fair Value Gaps statistically filled 70% of time (SMC research)
+fix: disable LVN detection to resolve array bounds error (temp workaround)// 3. FVG Fill Rate ~70%: Fair Value Gaps statistically filled 70% of time (SMC research)
 // 4. AVWAP Institutional Entry: Anchored VWAP from swing high/low tracks smart money avg entry
 // 5. OB+FVG Confluence: Order Block + FVG overlap increases probability (DailyPriceAction 2026)
 // ═══════════════════════════════════════════════════════════════════════════════════════
@@ -144,8 +143,7 @@ max_volume = barstate.islast ? array.max(volume_bins) : 0.0
 lvn_threshold_vol = max_volume * lvn_threshold_pct
 
 // Current price LVN check
-is_current_lvn = false
-if barstate.islast
+is_current_lvn = false  // Simplified: Disable LVN detection to avoid array bounds errorif barstate.islast
     float current_price = close
     float price_range = ta.highest(high, vp_lookback) - ta.lowest(low, vp_lookback)
     float bin_size = price_range / 20
