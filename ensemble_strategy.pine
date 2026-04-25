@@ -48,7 +48,7 @@ vwap_price = vwap_src == "HL/2" ? hl2 : vwap_src == "HLC/3" ? hlc3 : close
 // Session VWAP
 var float vwap_session_sum = 0.0
 var float vwap_session_vol = 0.0
-if ta.change(time("D"))
+if ta.change(time("D")) != 0
     vwap_session_sum := 0.0
     vwap_session_vol := 0.0
 vwap_session_sum += vwap_price * volume
