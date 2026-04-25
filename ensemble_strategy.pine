@@ -1,131 +1,346 @@
 //@version=5
-strategy("Hyperliquid 6-Signal Ensemble", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=100000, commission_type=strategy.commission.percent, commission_value=0.05)
+strategy("SMC + VWAP Edge Strategy", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.05)
 
-// ============================================================
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// STRATEGY EDGE OVERVIEW
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// 1. VWAP Mean-Reversion: Institutional positioning anchor (Sharpe 2.1 proven, Concretum 2024)
+// 2. LVN Acceleration: Price moves fast through low-volume zones (no resistance)
+// 3. FVG Fill Rate ~70%: Fair Value Gaps statistically filled 70% of time (SMC research)
+// 4. AVWAP Institutional Entry: Anchored VWAP from swing high/low tracks smart money avg entry
+// 5. OB+FVG Confluence: Order Block + FVG overlap increases probability (DailyPriceAction 2026)
+// ═══════════════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════════════
 // INPUTS
-// ============================================================
-atr_mult      = input.float(5.5,  "ATR Trailing Stop Multiplier", minval=1.0, maxval=20.0)
-atr_len       = input.int(14,     "ATR Length")
-rsi_len       = input.int(8,      "RSI Length")
-rsi_ob        = input.int(75,     "RSI Overbought Exit")
-rsi_os        = input.int(25,     "RSI Oversold Exit")
-ema_fast      = input.int(9,      "EMA Fast")
-ema_slow      = input.int(21,     "EMA Slow")
-macd_fast     = input.int(12,     "MACD Fast")
-macd_slow     = input.int(26,     "MACD Slow")
-macd_signal   = input.int(9,      "MACD Signal")
-bb_len        = input.int(20,     "BB Length")
-bb_mult       = input.float(2.0,  "BB Multiplier")
-momentum_len  = input.int(20,     "Momentum Length")
-vs_mom_len    = input.int(5,      "Very-Short Momentum Length")
-cooldown_bars = input.int(3,      "Cooldown Bars after Exit")
-vote_thresh   = input.int(4,      "Min Votes to Enter (of 6)")
+// ═══════════════════════════════════════════════════════════════════════════════════════
 
-// ============================================================
-// SIGNALS
-// ============================================================
+// VWAP Settings
+vwap_src = input.string("HL/2", "VWAP Source", options=["HLC/3", "HL/2", "Close"])
+show_vwap_session = input.bool(true, "Show Session VWAP")
+show_vwap_weekly = input.bool(true, "Show Weekly VWAP")
+show_vwap_monthly = input.bool(true, "Show Monthly VWAP")
+show_avwap = input.bool(true, "Show Anchored VWAP")
+avwap_lookback = input.int(100, "AVWAP Swing Lookback", minval=10, maxval=500)
 
-// 1) Momentum
-mom         = close - close[momentum_len]
-sig_mom     = mom > 0 ? 1 : mom < 0 ? -1 : 0
+// Volume Profile / LVN Settings
+vp_lookback = input.int(50, "Volume Profile Lookback", minval=10, maxval=200)
+lvn_threshold_pct = input.float(0.3, "LVN Threshold (% of max volume)", minval=0.1, maxval=0.8, step=0.05)
 
-// 2) Very-Short Momentum
-vs_mom      = close - close[vs_mom_len]
-sig_vsmom   = vs_mom > 0 ? 1 : vs_mom < 0 ? -1 : 0
+// SMC Settings (Order Blocks, Fair Value Gaps)
+ob_lookback = input.int(10, "Order Block Lookback", minval=3, maxval=50)
+fvg_min_gap_pct = input.float(0.1, "FVG Min Gap (% of price)", minval=0.05, maxval=1.0, step=0.05)
+fvg_lookback = input.int(20, "FVG Lookback", minval=5, maxval=100)
 
-// 3) EMA Crossover
-ema_f       = ta.ema(close, ema_fast)
-ema_s       = ta.ema(close, ema_slow)
-sig_ema     = ema_f > ema_s ? 1 : ema_f < ema_s ? -1 : 0
+// Entry Logic
+entry_min_confluence = input.int(3, "Min Confluence Signals (of 5)", minval=2, maxval=5)
 
-// 4) RSI(8)
-rsi_val     = ta.rsi(close, rsi_len)
-sig_rsi     = rsi_val > 50 ? 1 : rsi_val < 50 ? -1 : 0
+// Risk Management
+rr_target = input.float(2.0, "Risk:Reward Target", minval=1.0, maxval=5.0, step=0.5)
+stop_atr_mult = input.float(1.5, "Stop-Loss ATR Multiplier", minval=0.5, maxval=5.0, step=0.5)
+atr_len = input.int(14, "ATR Length")
 
-// 5) MACD
-[macd_line, signal_line, _] = ta.macd(close, macd_fast, macd_slow, macd_signal)
-sig_macd    = macd_line > signal_line ? 1 : macd_line < signal_line ? -1 : 0
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// VWAP CALCULATIONS (HL/2 for better institutional tracking)
+// ═══════════════════════════════════════════════════════════════════════════════════════
 
-// 6) BB Compression (breakout direction)
-basis       = ta.sma(close, bb_len)
-dev         = bb_mult * ta.stdev(close, bb_len)
-upper_bb    = basis + dev
-lower_bb    = basis - dev
-bb_width    = (upper_bb - lower_bb) / basis
-bb_compress = bb_width < ta.sma(bb_width, 50)
-sig_bb      = bb_compress and close > basis ? 1 : bb_compress and close < basis ? -1 : 0
+vwap_price = vwap_src == "HL/2" ? hl2 : vwap_src == "HLC/3" ? hlc3 : close
 
-// ============================================================
-// ENSEMBLE VOTE (4-of-6 majority)
-// ============================================================
-total_long  = (sig_mom == 1 ? 1 : 0) + (sig_vsmom == 1 ? 1 : 0) + (sig_ema == 1 ? 1 : 0) + (sig_rsi == 1 ? 1 : 0) + (sig_macd == 1 ? 1 : 0) + (sig_bb == 1 ? 1 : 0)
-total_short = (sig_mom ==-1 ? 1 : 0) + (sig_vsmom ==-1 ? 1 : 0) + (sig_ema ==-1 ? 1 : 0) + (sig_rsi ==-1 ? 1 : 0) + (sig_macd ==-1 ? 1 : 0) + (sig_bb ==-1 ? 1 : 0)
+// Session VWAP
+var float vwap_session_sum = 0.0
+var float vwap_session_vol = 0.0
+if ta.change(time("D"))
+    vwap_session_sum := 0.0
+    vwap_session_vol := 0.0
+vwap_session_sum += vwap_price * volume
+vwap_session_vol += volume
+vwap_session = vwap_session_vol > 0 ? vwap_session_sum / vwap_session_vol : na
 
-enter_long  = total_long  >= vote_thresh
-enter_short = total_short >= vote_thresh
+// Weekly VWAP
+var float vwap_week_sum = 0.0
+var float vwap_week_vol = 0.0
+if ta.change(time("W"))
+    vwap_week_sum := 0.0
+    vwap_week_vol := 0.0
+vwap_week_sum += vwap_price * volume
+vwap_week_vol += volume
+vwap_week = vwap_week_vol > 0 ? vwap_week_sum / vwap_week_vol : na
 
-// ============================================================
-// ATR TRAILING STOP
-// ============================================================
-atr_val     = ta.atr(atr_len)
-var float trail_stop = na
+// Monthly VWAP
+var float vwap_month_sum = 0.0
+var float vwap_month_vol = 0.0
+if ta.change(time("M"))
+    vwap_month_sum := 0.0
+    vwap_month_vol := 0.0
+vwap_month_sum += vwap_price * volume
+vwap_month_vol += volume
+vwap_month = vwap_month_vol > 0 ? vwap_month_sum / vwap_month_vol : na
 
-if strategy.position_size > 0
-    trail_stop := math.max(nz(trail_stop, low), close - atr_mult * atr_val)
-else if strategy.position_size < 0
-    trail_stop := math.min(nz(trail_stop, high), close + atr_mult * atr_val)
-else
-    trail_stop := na
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// ANCHORED VWAP (from recent swing high/low)
+// ═══════════════════════════════════════════════════════════════════════════════════════
 
-// ============================================================
-// COOLDOWN COUNTER
-// ============================================================
-var int bars_since_exit = 0
+swing_high = ta.highest(high, avwap_lookback)
+swing_low = ta.lowest(low, avwap_lookback)
 
-if strategy.position_size == 0
-    bars_since_exit += 1
-else
-    bars_since_exit := 0
+var int avwap_high_bar = 0
+var int avwap_low_bar = 0
 
-in_cooldown = bars_since_exit < cooldown_bars and bars_since_exit > 0
+if high == swing_high
+    avwap_high_bar := bar_index
+if low == swing_low
+    avwap_low_bar := bar_index
 
-// ============================================================
-// ENTRIES
-// ============================================================
-if enter_long and strategy.position_size <= 0 and not in_cooldown
-    strategy.entry("Long", strategy.long)
-    trail_stop := close - atr_mult * atr_val
+var float avwap_high_sum = 0.0
+var float avwap_high_vol = 0.0
+var float avwap_low_sum = 0.0
+var float avwap_low_vol = 0.0
 
-if enter_short and strategy.position_size >= 0 and not in_cooldown
-    strategy.entry("Short", strategy.short)
-    trail_stop := close + atr_mult * atr_val
+if bar_index == avwap_high_bar
+    avwap_high_sum := 0.0
+    avwap_high_vol := 0.0
 
-// ============================================================
-// EXITS: ATR Trailing Stop + RSI Extreme Exit
-// ============================================================
-if strategy.position_size > 0
-    if close < trail_stop
-        strategy.close("Long", comment="ATR Trail Stop")
-    if rsi_val > rsi_ob
-        strategy.close("Long", comment="RSI OB Exit")
+if bar_index == avwap_low_bar
+    avwap_low_sum := 0.0
+    avwap_low_vol := 0.0
 
-if strategy.position_size < 0
-    if close > trail_stop
-        strategy.close("Short", comment="ATR Trail Stop")
-    if rsi_val < rsi_os
-        strategy.close("Short", comment="RSI OS Exit")
+if bar_index >= avwap_high_bar
+    avwap_high_sum += vwap_price * volume
+    avwap_high_vol += volume
 
-// ============================================================
-// PLOTS
-// ============================================================
-plot(ema_f, "EMA Fast", color=color.new(color.blue, 0),  linewidth=1)
-plot(ema_s, "EMA Slow", color=color.new(color.orange, 0), linewidth=1)
-plot(trail_stop, "ATR Trail Stop", color=color.new(color.red, 0), style=plot.style_cross, linewidth=1)
-hline(0, "Zero", color=color.gray)
+if bar_index >= avwap_low_bar
+    avwap_low_sum += vwap_price * volume
+    avwap_low_vol += volume
 
-bgcol = strategy.position_size > 0 ? color.new(color.green, 90) : strategy.position_size < 0 ? color.new(color.red, 90) : na
-bgcolor(bgcol)
+avwap_from_high = avwap_high_vol > 0 ? avwap_high_sum / avwap_high_vol : na
+avwap_from_low = avwap_low_vol > 0 ? avwap_low_sum / avwap_low_vol : na
 
-// Vote strength label (optional debug)
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// VOLUME PROFILE & LOW VOLUME NODES (LVN)
+// ═══════════════════════════════════════════════════════════════════════════════════════
+
+var float[] price_bins = array.new_float(20, 0.0)
+var float[] volume_bins = array.new_float(20, 0.0)
+
 if barstate.islast
-    label.new(bar_index, high, "L:" + str.tostring(total_long) + " S:" + str.tostring(total_short), style=label.style_label_down, size=size.small)
+    array.clear(price_bins)
+    array.clear(volume_bins)
+    
+    float price_range = ta.highest(high, vp_lookback) - ta.lowest(low, vp_lookback)
+    float bin_size = price_range / 20
+    float range_low = ta.lowest(low, vp_lookback)
+    
+    for i = 0 to 19
+        array.set(price_bins, i, range_low + bin_size * (i + 0.5))
+    
+    for j = 0 to vp_lookback - 1
+        float bar_price = hl2[j]
+        float bar_vol = volume[j]
+        int bin_idx = math.floor((bar_price - range_low) / bin_size)
+        if bin_idx >= 0 and bin_idx < 20
+            array.set(volume_bins, bin_idx, array.get(volume_bins, bin_idx) + bar_vol)
+
+max_volume = barstate.islast ? array.max(volume_bins) : 0.0
+lvn_threshold_vol = max_volume * lvn_threshold_pct
+
+// Current price LVN check
+is_current_lvn = false
+if barstate.islast
+    float current_price = close
+    float price_range = ta.highest(high, vp_lookback) - ta.lowest(low, vp_lookback)
+    float bin_size = price_range / 20
+    float range_low = ta.lowest(low, vp_lookback)
+    int current_bin = math.floor((current_price - range_low) / bin_size)
+    if current_bin >= 0 and current_bin < 20
+        float current_bin_vol = array.get(volume_bins, current_bin)
+        is_current_lvn := current_bin_vol < lvn_threshold_vol
+
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// SMC: FAIR VALUE GAPS (FVG)
+// ═══════════════════════════════════════════════════════════════════════════════════════
+
+// Bullish FVG: gap between high[2] and low[0], candle[1] must not fill it
+bull_fvg_top = low
+bull_fvg_bot = high[2]
+bull_fvg = (low - high[2]) > (close * fvg_min_gap_pct / 100) and high[1] < low and low[1] > high[2]
+
+// Bearish FVG: gap between low[2] and high[0], candle[1] must not fill it
+bear_fvg_top = low[2]
+bear_fvg_bot = high
+bear_fvg = (low[2] - high) > (close * fvg_min_gap_pct / 100) and low[1] > high and high[1] < low[2]
+
+// Track recent FVG zones
+var float[] bull_fvg_tops = array.new_float()
+var float[] bull_fvg_bots = array.new_float()
+var float[] bear_fvg_tops = array.new_float()
+var float[] bear_fvg_bots = array.new_float()
+
+if bull_fvg
+    array.push(bull_fvg_tops, bull_fvg_top)
+    array.push(bull_fvg_bots, bull_fvg_bot)
+    if array.size(bull_fvg_tops) > fvg_lookback
+        array.shift(bull_fvg_tops)
+        array.shift(bull_fvg_bots)
+
+if bear_fvg
+    array.push(bear_fvg_tops, bear_fvg_top)
+    array.push(bear_fvg_bots, bear_fvg_bot)
+    if array.size(bear_fvg_tops) > fvg_lookback
+        array.shift(bear_fvg_tops)
+        array.shift(bear_fvg_bots)
+
+// Check if price is inside any recent FVG
+inside_bull_fvg = false
+inside_bear_fvg = false
+
+for i = 0 to array.size(bull_fvg_tops) - 1
+    if close >= array.get(bull_fvg_bots, i) and close <= array.get(bull_fvg_tops, i)
+        inside_bull_fvg := true
+        break
+
+for i = 0 to array.size(bear_fvg_tops) - 1
+    if close >= array.get(bear_fvg_bots, i) and close <= array.get(bear_fvg_tops, i)
+        inside_bear_fvg := true
+        break
+
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// SMC: ORDER BLOCKS (OB)
+// ═══════════════════════════════════════════════════════════════════════════════════════
+
+// Bullish OB: last down-candle before strong up-move
+bullish_ob_condition = close[1] < open[1] and close > open and (close - open) > 2 * (open[1] - close[1])
+bullish_ob_top = high[1]
+bullish_ob_bot = low[1]
+
+// Bearish OB: last up-candle before strong down-move
+bearish_ob_condition = close[1] > open[1] and close < open and (open - close) > 2 * (close[1] - open[1])
+bearish_ob_top = high[1]
+bearish_ob_bot = low[1]
+
+// Track recent OB zones
+var float[] bull_ob_tops = array.new_float()
+var float[] bull_ob_bots = array.new_float()
+var float[] bear_ob_tops = array.new_float()
+var float[] bear_ob_bots = array.new_float()
+
+if bullish_ob_condition
+    array.push(bull_ob_tops, bullish_ob_top)
+    array.push(bull_ob_bots, bullish_ob_bot)
+    if array.size(bull_ob_tops) > ob_lookback
+        array.shift(bull_ob_tops)
+        array.shift(bull_ob_bots)
+
+if bearish_ob_condition
+    array.push(bear_ob_tops, bearish_ob_top)
+    array.push(bear_ob_bots, bearish_ob_bot)
+    if array.size(bear_ob_tops) > ob_lookback
+        array.shift(bear_ob_tops)
+        array.shift(bear_ob_bots)
+
+// Check if price is inside any recent OB
+inside_bull_ob = false
+inside_bear_ob = false
+
+for i = 0 to array.size(bull_ob_tops) - 1
+    if close >= array.get(bull_ob_bots, i) and close <= array.get(bull_ob_tops, i)
+        inside_bull_ob := true
+        break
+
+for i = 0 to array.size(bear_ob_tops) - 1
+    if close >= array.get(bear_ob_bots, i) and close <= array.get(bear_ob_tops, i)
+        inside_bear_ob := true
+        break
+
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// CONFLUENCE SCORING
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// Long Confluence Signals:
+// 1. Price inside or near bullish FVG
+// 2. Price inside or near bullish Order Block
+// 3. Price at LVN (fast move expected)
+// 4. Price below VWAP / AVWAP (mean reversion setup)
+// 5. Price held above Weekly/Monthly VWAP support
+
+long_score = 0
+short_score = 0
+
+// Signal 1: Inside Bullish FVG
+if inside_bull_fvg
+    long_score += 1
+
+// Signal 2: Inside Bullish OB
+if inside_bull_ob
+    long_score += 1
+
+// Signal 3: Price at LVN
+if is_current_lvn
+    long_score += 1
+
+// Signal 4: Price below VWAP (mean reversion long setup)
+if not na(vwap_session) and close < vwap_session and not na(avwap_from_low) and close < avwap_from_low
+    long_score += 1
+
+// Signal 5: Weekly VWAP support
+if not na(vwap_week) and close > vwap_week and close < vwap_week * 1.005
+    long_score += 1
+
+// --- SHORT SIGNALS ---
+
+// Signal 1: Inside Bearish FVG
+if inside_bear_fvg
+    short_score += 1
+
+// Signal 2: Inside Bearish OB
+if inside_bear_ob
+    short_score += 1
+
+// Signal 3: Price at LVN
+if is_current_lvn
+    short_score += 1
+
+// Signal 4: Price above VWAP (mean reversion short setup)
+if not na(vwap_session) and close > vwap_session and not na(avwap_from_high) and close > avwap_from_high
+    short_score += 1
+
+// Signal 5: Weekly VWAP resistance
+if not na(vwap_week) and close < vwap_week and close > vwap_week * 0.995
+    short_score += 1
+
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// ENTRY & EXIT LOGIC
+// ═══════════════════════════════════════════════════════════════════════════════════════
+
+enter_long = long_score >= entry_min_confluence and strategy.position_size == 0
+enter_short = short_score >= entry_min_confluence and strategy.position_size == 0
+
+atr_val = ta.atr(atr_len)
+
+if enter_long
+    stop_loss = close - (atr_val * stop_atr_mult)
+    take_profit = close + (atr_val * stop_atr_mult * rr_target)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", "Long", stop=stop_loss, limit=take_profit)
+
+if enter_short
+    stop_loss = close + (atr_val * stop_atr_mult)
+    take_profit = close - (atr_val * stop_atr_mult * rr_target)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", "Short", stop=stop_loss, limit=take_profit)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════════════════════════════════
+
+plot(show_vwap_session and not na(vwap_session) ? vwap_session : na, "Session VWAP", color=color.new(color.blue, 0), linewidth=2)
+plot(show_vwap_weekly and not na(vwap_week) ? vwap_week : na, "Weekly VWAP", color=color.new(color.orange, 0), linewidth=2)
+plot(show_vwap_monthly and not na(vwap_month) ? vwap_month : na, "Monthly VWAP", color=color.new(color.purple, 0), linewidth=2)
+plot(show_avwap and not na(avwap_from_high) ? avwap_from_high : na, "AVWAP from High", color=color.new(color.red, 30), linewidth=1, style=plot.style_circles)
+plot(show_avwap and not na(avwap_from_low) ? avwap_from_low : na, "AVWAP from Low", color=color.new(color.green, 30), linewidth=1, style=plot.style_circles)
+
+// Confluence score labels
+if barstate.islast and (long_score >= entry_min_confluence or short_score >= entry_min_confluence)
+    label_text = "Long: " + str.tostring(long_score) + " | Short: " + str.tostring(short_score)
+    label_color = long_score >= entry_min_confluence ? color.new(color.green, 80) : color.new(color.red, 80)
+    label.new(bar_index, high, label_text, style=label.style_label_down, color=label_color, textcolor=color.white, size=size.small)
+
+bgcolor(inside_bull_fvg or inside_bull_ob ? color.new(color.green, 95) : inside_bear_fvg or inside_bear_ob ? color.new(color.red, 95) : na, title="SMC Zone Highlight")
